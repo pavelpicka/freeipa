@@ -71,24 +71,38 @@ def check_removal_disconnects_topology(
 
 class ServerDelBase(IntegrationTest):
     num_replicas = 2
-    num_clients = 1
+    num_clients = 0
     domain_level = DOMAIN_LEVEL_1
     topology = 'star'
 
     @classmethod
     def install(cls, mh):
         super(ServerDelBase, cls).install(mh)
-
-        cls.client = cls.clients[0]
         cls.replica1 = cls.replicas[0]
         cls.replica2 = cls.replicas[1]
+
+
+def remove_segment(master, left, right, suffix=DOMAIN_SUFFIX_NAME):
+    """
+    Ensure that segment left-right or right-left don't exist
+    :param suffix: default is DOMAIN_SUFFIX_NAME,
+                   could be change to CA_SUFFIX_NAME
+    """
+
+    segment_name_fmt = '{p[0].hostname}-to-{p[1].hostname}'
+    for ca_pair in permutations((left, right)):
+        tasks.destroy_segment(
+            master, segment_name_fmt.format(p=ca_pair),
+            suffix=suffix)
 
 
 class TestServerDel(ServerDelBase):
 
     @classmethod
     def install(cls, mh):
-        super(TestServerDel, cls).install(mh)
+        cls.replica1 = cls.replicas[0]
+        cls.replica2 = cls.replicas[1]
+    #    super(TestServerDel, cls).install(mh)
         # prepare topologysegments for negative test cases
         # it should look like this for DOMAIN_SUFFIX_NAME:
         #             master
@@ -102,21 +116,29 @@ class TestServerDel(ServerDelBase):
         #                   \
         #                    \
         #   replica1------- replica2
-
-        tasks.create_segment(cls.client, cls.replica1, cls.replica2)
-        tasks.create_segment(cls.client, cls.replica1, cls.replica2,
+        """ Install topology manually as no need automatic teardown by inherited cls method """
+        tasks.install_master(cls.master)
+        tasks.install_replica(cls.master, cls.replica1, setup_dns=True,
+                              setup_ca=True)
+        tasks.install_replica(cls.master, cls.replica2, setup_dns=True,
+                              setup_ca=True)
+        # create new segment between replica1/2
+        tasks.create_segment(cls.master, cls.replica1, cls.replica2)
+        tasks.create_segment(cls.master, cls.replica1, cls.replica2,
                              suffix=CA_SUFFIX_NAME)
-
         # try to delete all relevant segment connecting master and replica1/2
-        segment_name_fmt = '{p[0].hostname}-to-{p[1].hostname}'
-        for domain_pair in permutations((cls.master, cls.replica2)):
-            tasks.destroy_segment(
-                cls.client, segment_name_fmt.format(p=domain_pair))
+        remove_segment(cls.master, cls.master, cls.replica2)
+        remove_segment(cls.master, cls.master, cls.replica1,
+                       suffix=CA_SUFFIX_NAME)
 
-        for ca_pair in permutations((cls.master, cls.replica1)):
-            tasks.destroy_segment(
-                cls.client, segment_name_fmt.format(p=ca_pair),
-                suffix=CA_SUFFIX_NAME)
+    #    tasks.create_segment(cls.master, cls.replica1, cls.replica2)
+    #    tasks.create_segment(cls.master, cls.replica1, cls.replica2,
+    #                         suffix=CA_SUFFIX_NAME)
+
+    #    # try to delete all relevant segment connecting master and replica1/2
+    #    remove_segment(cls.master, cls.master, cls.replica2)
+    #    remove_segment(cls.master, cls.master, cls.replica1,
+    #                   suffix=CA_SUFFIX_NAME)
 
     def test_removal_of_nonexistent_master_raises_error(self):
         """
@@ -125,7 +147,7 @@ class TestServerDel(ServerDelBase):
         hostname = u'bogus-master.bogus.domain'
         err_message = "{}: server not found".format(hostname)
         tasks.assert_error(
-            tasks.run_server_del(self.client, hostname),
+            tasks.run_server_del(self.master, hostname),
             err_message,
             returncode=2
         )
@@ -136,7 +158,7 @@ class TestServerDel(ServerDelBase):
         an error
         """
         hostname = u'bogus-master.bogus.domain'
-        result = tasks.run_server_del(self.client, hostname, force=True)
+        result = tasks.run_server_del(self.master, hostname, force=True)
         assert result.returncode == 0
         assert ('Deleted IPA server "{}"'.format(hostname) in
                 result.stdout_text)
@@ -150,7 +172,7 @@ class TestServerDel(ServerDelBase):
         """
 
         check_removal_disconnects_topology(
-            self.client,
+            self.master,
             self.replica1.hostname,
             affected_suffixes=(DOMAIN_SUFFIX_NAME,)
         )
@@ -162,66 +184,86 @@ class TestServerDel(ServerDelBase):
         """
 
         check_removal_disconnects_topology(
-            self.client,
+            self.master,
             self.replica2.hostname,
             affected_suffixes=(CA_SUFFIX_NAME,)
         )
 
     def test_ignore_topology_disconnect_replica1(self):
         """
-        tests that removal of replica1 with '--ignore-topology-disconnect'
-        destroys master for good
+        tests that server-del of replica1 with '--ignore-topology-disconnect'
+        passes
         """
         check_master_removal(
-            self.client,
+            self.master,
             self.replica1.hostname,
             ignore_topology_disconnect=True
         )
 
         # reinstall the replica
-        tasks.uninstall_master(self.replica1)
-        tasks.install_replica(self.master, self.replica1, setup_ca=True)
+        self.replica1.run_command(['ipa-server-install', '--uninstall', '--ignore-topology-disconnect', '--ignore-last-of-role', '-U'])
+        self.replica2.run_command(['ipa-server-install', '--uninstall', '--ignore-topology-disconnect', '--ignore-last-of-role', '-U'])
+        tasks.install_replica(self.master, self.replica1, setup_dns=True,
+                              setup_ca=True)
+        tasks.install_replica(self.master, self.replica2, setup_dns=True,
+                              setup_ca=True)
+        # here bring it to default state
+        tasks.create_segment(self.master, self.replica1, self.replica2)
+        tasks.create_segment(self.master, self.replica1, self.replica2,
+                             suffix=CA_SUFFIX_NAME)
+        remove_segment(self.master, self.master, self.replica2)
+        remove_segment(self.master, self.master, self.replica1,
+                       suffix=CA_SUFFIX_NAME)
 
     def test_ignore_topology_disconnect_replica2(self):
         """
-        tests that removal of replica2 with '--ignore-topology-disconnect'
-        destroys master for good
+        tests that server-del of replica2 with '--ignore-topology-disconnect'
+        passes
         """
         check_master_removal(
-            self.client,
+            self.master,
             self.replica2.hostname,
             ignore_topology_disconnect=True
         )
 
         # reinstall the replica
-        tasks.uninstall_master(self.replica2)
+        self.replica1.run_command(['ipa-server-install', '--uninstall', '-U', '--ignore-topology-disconnect'])
+        self.replica2.run_command(['ipa-server-install', '--uninstall', '-U', '--ignore-topology-disconnect'])
+        tasks.install_replica(self.master, self.replica1, setup_dns=True)
         tasks.install_replica(self.master, self.replica2, setup_ca=True)
+        # here bring it to default state
+        # tasks.create_segment(self.master, self.replica1, self.replica2)
+        # tasks.create_segment(self.master, self.replica1, self.replica2,
+        #                      suffix=CA_SUFFIX_NAME)
+        remove_segment(self.master, self.master, self.replica2)
+        remove_segment(self.master, self.master, self.replica1,
+                       suffix=CA_SUFFIX_NAME)
 
     def test_removal_of_master_disconnects_both_topologies(self):
         """
         tests that master removal will now raise errors in both suffixes.
         """
         check_removal_disconnects_topology(
-            self.client,
+            self.master,
             self.master.hostname,
             affected_suffixes=(CA_SUFFIX_NAME, DOMAIN_SUFFIX_NAME)
         )
 
     def test_removal_of_replica1(self):
         """
-        tests the removal of replica1 which should now pass without errors
+        tests the server-del of replica1 which should now pass without errors
         """
         check_master_removal(
-            self.client,
+            self.master,
             self.replica1.hostname
         )
 
     def test_removal_of_replica2(self):
         """
-        tests the removal of replica2 which should now pass without errors
+        tests the server-del of replica2 which should now pass without errors
         """
         check_master_removal(
-            self.client,
+            self.master,
             self.replica2.hostname
         )
 
